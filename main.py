@@ -1,50 +1,67 @@
-from telegram.ext import (Updater, MessageHandler, Filters, CommandHandler,
-                          ConversationHandler)
-from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove, Bot
+import os
 import json
+from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup, Bot
+from telegram.ext import (Updater, MessageHandler, Filters, CommandHandler,
+                          ConversationHandler, CallbackQueryHandler, PicklePersistence)
+from dotenv import load_dotenv
+from states import *
 
-
-POST, HASHTAG, REMEMBER_HASHTAG, CANCEL_HASHTAG, DESCRIPTION, PUBLISH, CONFIRMATION = range(7)
+load_dotenv()
+persistence = PicklePersistence('./persistence')
 
 
 def start(update, _):
-    update.message.reply_text('Этот бот умеет выкладывать посты и добавлять описание\n'
-                              'Если вы хотите сделать пост - напишите /post')
+    reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton('Сделать пост', callback_data='/post')]])
+    update.message.reply_text('Этот бот умеет выкладывать посты и добавлять описание', reply_markup=reply_markup)
     return POST
 
 
 def post(update, _):    # заправшивает источник
-    update.message.reply_text('Мы ждём от вас источник, который вы хотите опубликовать')
-    return HASHTAG
+    update.callback_query.message.reply_text('Мы ждём от вас источник, который вы хотите опубликовать')
+    return DOC_TYPE
 
 
 def remember_text(update, context):
     context.user_data['post'] = update.message.text
-    context.user_data['message_type'] = 'text'
-    return hashtag(update, context)
+    context.user_data['message_type'] = 'ref'
+    return doc_type(update, context.user_data['message_type'])
 
 
 def remember_photo(update, context):
     context.user_data['post'] = update.message.photo[0].file_id     # получаю id отправленного фото
     context.user_data['message_type'] = 'photo'
-    return hashtag(update, context)
+    return doc_type(update, context.user_data['message_type'])
 
 
 def remember_video(update, context):
     context.user_data['post'] = update.message.video.file_id     # получаю id отправленного видео
     context.user_data['message_type'] = 'video'
-    return hashtag(update, context)
+    return doc_type(update, context.user_data['message_type'])
+
+
+def remember_audio(update, context):
+    context.user_data['post'] = update.message.audio.file_id
+    context.user_data['message_type'] = 'audio'
+    return doc_type(update, context.user_data['message_type'])
 
 
 def remember_doc(update, context):
     context.user_data['post'] = update.message.document.file_id  # получаю id отправленного видео
     context.user_data['message_type'] = 'doc'
-    return hashtag(update, context)
+    return doc_type(update, context.user_data['message_type'])
+
+
+def doc_type(update, document_type):
+    reply_markup = ReplyKeyboardMarkup(json_data[document_type + '_type'], resize_keyboard=True, one_time_keyboard=True)
+    update.message.reply_text('Как вы охарактеризуете этот ресурс?', reply_markup=reply_markup)
+    return HASHTAG
 
 
 def hashtag(update, context):   # запоминает источник в user_data и запрашивает хэштеги
     context.user_data['hashtag'] = []
-    reply_markup = ReplyKeyboardMarkup(json_data['liked'], resize_keyboard=True)
+    context.user_data['hashtag'].append('#{}'.format(update.message.text.replace(' ', '').lower()))
+    reply_markup = ReplyKeyboardMarkup(json_data[context.user_data['message_type'] + '_descriptors'],
+                                       resize_keyboard=True)
     update.message.reply_text('Чем вам понравился этот ресурс?\n'
                               'Вы можете выбрать несколько вариантов\n'
                               'Если хотите закончить свой выбор - напишите /cancel', reply_markup=reply_markup)
@@ -52,7 +69,7 @@ def hashtag(update, context):   # запоминает источник в user_
 
 
 def remember_hashtag(update, context):  # записывает хэштеги в user_data
-    context.user_data['hashtag'].append('#{}'.format(update.message.text.lower()))
+    context.user_data['hashtag'].append('#{}'.format(update.message.text.replace(' ', '').lower()))
     return REMEMBER_HASHTAG
 
 
@@ -85,7 +102,7 @@ def confirmation(update, context):    # выдаёт заполненный по
 
     update.message.reply_text('Ваш пост сформирован:\n')
 
-    if context.user_data['message_type'] == 'text':
+    if context.user_data['message_type'] == 'ref':
         context.user_data['post'] += hashtag_description
         send_message(bot.send_message, update.message.chat.id, context)
     elif context.user_data['message_type'] == 'photo':
@@ -101,7 +118,8 @@ def confirmation(update, context):    # выдаёт заполненный по
 
 
 def publish(update, context):   # публикует пост в источник
-    bot.forward_message('@fasdgdfhgdfhgfd', update.message.chat.id, context.user_data['result_message_id'])
+    if update.message.text == 'Да':
+        bot.forward_message(CHANNEL_NAME, update.message.chat.id, context.user_data['result_message_id'])
     update.message.reply_text('До встречи!', reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
@@ -116,20 +134,24 @@ if __name__ == '__main__':
     with open('config.json', 'r', encoding='UTF-8') as file:
         json_data = json.load(file)
 
-    bot = Bot(json_data['token'])
-    updater = Updater(json_data['token'], use_context=True)
+    TOKEN = os.getenv('TOKEN')
+    CHANNEL_NAME = os.getenv('CHANNEL_NAME')
+    bot = Bot(TOKEN)
+    updater = Updater(TOKEN, use_context=True, persistence=persistence)
     dp = updater.dispatcher
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={
-            POST: [CommandHandler('post', post)],
-            HASHTAG: [
+            POST: [CommandHandler('post', post), CallbackQueryHandler(post)],
+            DOC_TYPE: [
                 MessageHandler(Filters.text, remember_text),
                 MessageHandler(Filters.photo, remember_photo),
                 MessageHandler(Filters.video, remember_video),
-                MessageHandler(Filters.document, remember_doc)
+                MessageHandler(Filters.audio, remember_audio),
+                MessageHandler(Filters.document, remember_doc),
             ],
+            HASHTAG: [MessageHandler(Filters.text, hashtag)],
             REMEMBER_HASHTAG: [
                 CommandHandler('cancel', cancel_hashtag),
                 MessageHandler(Filters.text, remember_hashtag)
@@ -138,11 +160,10 @@ if __name__ == '__main__':
             CONFIRMATION: [MessageHandler(Filters.text, confirmation), ],
             PUBLISH: [MessageHandler(Filters.text, publish)],
         },
-        fallbacks=[CommandHandler('stop', stop)]
+        fallbacks=[CommandHandler('stop', stop)], persistent=True, name='iss-art-media'
     )
 
     dp.add_handler(conv_handler)
-    #dp.add_handler(CommandHandler('post', post))
 
     updater.start_polling()
     updater.idle()
